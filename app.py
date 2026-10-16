@@ -1,595 +1,582 @@
-from fastapi import FastAPI, Form
+import secrets
+import resend
+from fastapi import FastAPI, Form, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from database import (
-    init_db, obter_nome_torneio_db, atualizar_nome_torneio_db, registar_usuario, 
-    verificar_login, carregar_usuarios_db, resetar_senha_db, alterar_papel_db, 
-    apagar_usuario_db, carregar_modalidades_db, atualizar_limite_modalidade_db, 
-    adicionar_modalidade_db, apagar_modalidade_db, adicionar_time_db, carregar_times_db, 
-    apagar_time_db, gerar_confrontos_automaticos, carregar_confrontos_db, 
-    atualizar_resultado_confronto, publicar_mensagem_db, carregar_mensagens_db, apagar_mensagem_db
+    init_db, carregar_torneios_db, criar_torneio_db, apagar_torneio_db, obter_configuracao_db, atualizar_configuracao_db, atualizar_nome_torneio_db,
+    registar_usuario, verificar_login, carregar_usuarios_db, contar_usuarios_db,
+    resetar_senha_db, criar_token_recuperacao, verificar_token_db, alterar_papel_db, apagar_usuario_db,
+    carregar_modalidades_db, adicionar_modalidade_db, apagar_modalidade_db, 
+    carregar_series_turmas_db, adicionar_serie_turma_db, apagar_serie_turma_db,
+    adicionar_time_db, carregar_times_db, carregar_participantes_time, contar_times_db, apagar_time_db, 
+    gerar_confrontos_automaticos, carregar_confrontos_db, atualizar_resultado_confronto, 
+    publicar_mensagem_db, carregar_mensagens_db, apagar_mensagem_db
 )
+
+app = FastAPI()
+
+RESEND_API_KEY = "re_Bm1Rc8Wp_73MtCmEhiSyzCg7yF6vuGbWG"
+resend.api_key = RESEND_API_KEY
+
+try:
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+except Exception:
+    pass
 
 init_db()
 
-app = FastAPI(title="Gestão de Torneios")
+def enviar_email_real(destinatario, link_recuperacao):
+    if not RESEND_API_KEY.startswith("re_"):
+        return False
+    try:
+        resend.Emails.send({
+            "from": "Torneios Auto <onboarding@resend.dev>",
+            "to": destinatario,
+            "subject": "Recuperação de Senha - Torneios Auto",
+            "html": f"""
+            <div style="font-family: sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; border-radius: 8px; max-width: 500px; margin: 0 auto;">
+                <h2 style="color: #f0f6fc; text-align: center;">🏆 Torneios Auto</h2>
+                <p>Recebemos um pedido para redefinir a palavra-passe da sua conta.</p>
+                <p style="text-align: center; margin: 25px 0;">
+                    <a href="{link_recuperacao}" style="background: #238636; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">Redefinir Minha Senha</a>
+                </p>
+            </div>
+            """
+        })
+        return True
+    except Exception as e:
+        print(f"\n[ERRO AO ENVIAR E-MAIL]: {e}\n")
+        return False
 
-SESSAO_ATUAL = {"utilizador": None, "papel": None}
+def resposta_html_sem_cache(html_content: str):
+    response = HTMLResponse(content=html_content)
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+@app.get("/login", response_class=HTMLResponse)
+def pagina_login(erro: str = None):
+    aviso = f"<p style='color: #da3633; margin-bottom: 15px; text-align: center; font-size: 14px;'>{erro}</p>" if erro else ""
+    html = f"""
+    <!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Login - Torneios Auto</title>
+    <style>body {{ background: #0d1117; color: #c9d1d9; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+    .card {{ background: #161b22; padding: 30px; border-radius: 12px; border: 1px solid #30363d; width: 320px; }}
+    input {{ width: 100%; padding: 10px; margin-bottom: 15px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; box-sizing: border-box; }}
+    button {{ width: 100%; padding: 10px; background: #238636; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }}</style>
+    </head><body><div class="card"><h2 style="text-align:center; color:#f0f6fc;">🏆 Torneios Auto</h2>{aviso}
+    <form action="/login" method="post">
+        <input type="text" name="username" placeholder="Utilizador ou E-mail" required>
+        <input type="password" name="senha" placeholder="Palavra-passe" required>
+        <button type="submit">Entrar</button>
+    </form>
+    <div style="text-align:center; margin-top:15px; font-size:13px;"><p><a href="/registar" style="color:#58a6ff;">Registar-se</a> | <a href="/recuperar" style="color:#58a6ff;">Esqueceu-se da senha?</a></p></div>
+    </div></body></html>
+    """
+    return resposta_html_sem_cache(html)
+
+@app.post("/login")
+def processar_login(username: str = Form(...), senha: str = Form(...)):
+    papel = verificar_login(username.strip(), senha.strip())
+    if papel:
+        u_limpo = username.strip()
+        torneios = carregar_torneios_db()
+        meus_torneios = torneios if papel == 'admin' else [t for t in torneios if str(t[3]).lower() == u_limpo.lower()]
+        url_destino = f"/t/{meus_torneios[0][2]}" if meus_torneios else "/"
+        response = RedirectResponse(url=url_destino, status_code=303)
+        response.set_cookie(key="user", value=u_limpo)
+        return response
+    return RedirectResponse(url="/login?erro=Utilizador+ou+palavra-passe+incorretos", status_code=303)
+
+@app.get("/registar", response_class=HTMLResponse)
+def pagina_registar(erro: str = None):
+    aviso = f"<p style='color: #da3633; margin-bottom: 15px; text-align: center; font-size: 14px;'>{erro}</p>" if erro else ""
+    html = f"""
+    <!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Registar - Torneios Auto</title>
+    <style>
+        body {{ background: #0d1117; color: #c9d1d9; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px 0; }}
+        .card {{ background: #161b22; padding: 30px; border-radius: 12px; border: 1px solid #30363d; width: 380px; box-sizing: border-box; }}
+        input {{ width: 100%; padding: 10px; margin-bottom: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; box-sizing: border-box; }}
+        button {{ width: 100%; padding: 10px; background: #238636; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }}
+    </style>
+    </head><body><div class="card"><h2 style="text-align:center; color:#f0f6fc; margin-top:0;">📝 Criar Conta</h2>{aviso}
+    <form action="/registar" method="post">
+        <input type="text" name="username" placeholder="Nome de Utilizador" required>
+        <input type="email" name="email" placeholder="E-mail" required>
+        <input type="password" name="senha" placeholder="Palavra-passe" required>
+        <button type="submit">Criar Conta e Entrar</button>
+    </form>
+    <div style="text-align:center; margin-top:15px; font-size:13px;"><a href="/login" style="color:#58a6ff;">Já tem conta? Fazer Login</a></div>
+    </div></body></html>
+    """
+    return resposta_html_sem_cache(html)
+
+@app.post("/registar")
+def processar_registar(username: str = Form(...), email: str = Form(...), senha: str = Form(...)):
+    u_limpo, e_limpo, s_limpo = username.strip(), email.strip(), senha.strip()
+    sucesso, msg = registar_usuario(u_limpo, e_limpo, s_limpo)
+    if not sucesso:
+        return RedirectResponse(url=f"/registar?erro={msg}", status_code=303)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(key="user", value=u_limpo)
+    return response
+
+@app.get("/recuperar", response_class=HTMLResponse)
+def pagina_recuperar(msg: str = None):
+    aviso = f"<p style='color: #3fb950; text-align: center; font-size: 13px;'>{msg}</p>" if msg else ""
+    html = f"""
+    <!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Recuperar Senha</title>
+    <style>body {{ background: #0d1117; color: #c9d1d9; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+    .card {{ background: #161b22; padding: 30px; border-radius: 12px; border: 1px solid #30363d; width: 350px; }}
+    input {{ width: 100%; padding: 10px; margin-bottom: 15px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; box-sizing: border-box; }}
+    button {{ width: 100%; padding: 10px; background: #8957e5; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }}</style>
+    </head><body><div class="card"><h2 style="text-align:center; color:#f0f6fc;">🔑 Recuperar Senha</h2>{aviso}
+    <form action="/recuperar" method="post"><input type="email" name="email" placeholder="O seu e-mail" required><button type="submit">Enviar E-mail</button></form>
+    <div style="text-align:center; margin-top:15px;"><a href="/login" style="color:#58a6ff; font-size:13px;">Voltar ao Login</a></div>
+    </div></body></html>
+    """
+    return resposta_html_sem_cache(html)
+
+@app.post("/recuperar")
+def processar_recuperar(request: Request, email: str = Form(...)):
+    token = secrets.token_urlsafe(32)
+    sucesso, _ = criar_token_recuperacao(email.strip(), token)
+    if sucesso:
+        enviar_email_real(email.strip(), f"{request.base_url}resetar/{token}")
+    return RedirectResponse(url="/recuperar?msg=Instruções enviadas para o e-mail.", status_code=303)
+
+@app.get("/resetar/{token}", response_class=HTMLResponse)
+def pagina_resetar(token: str):
+    username = verificar_token_db(token)
+    if not username:
+        return resposta_html_sem_cache("<body style='background:#0d1117; color:white; text-align:center; padding-top:20vh;'><h3>⚠️ Link inválido ou expirado.</h3></body>")
+    html = f"""
+    <!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Nova Senha</title>
+    <style>body {{ background: #0d1117; color: #c9d1d9; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+    .card {{ background: #161b22; padding: 30px; border-radius: 12px; border: 1px solid #30363d; width: 320px; }}
+    input {{ width: 100%; padding: 10px; margin-bottom: 15px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; box-sizing: border-box; }}
+    button {{ width: 100%; padding: 10px; background: #238636; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }}</style>
+    </head><body><div class="card"><h2 style="color:white; text-align:center;">Nova Senha</h2>
+    <form action="/resetar/{token}" method="post"><input type="password" name="nova_senha" placeholder="Nova palavra-passe" required><button type="submit">Atualizar</button></form></div></body></html>
+    """
+    return resposta_html_sem_cache(html)
+
+@app.post("/resetar/{token}")
+def processar_resetar(token: str, nova_senha: str = Form(...)):
+    username = verificar_token_db(token)
+    if username:
+        resetar_senha_db(username, nova_senha)
+    return RedirectResponse(url="/login", status_code=303)
 
 @app.get("/", response_class=HTMLResponse)
-def home(tab: str = "painel", filtro: str = "todos"):
-    user = SESSAO_ATUAL["utilizador"]
-    papel = SESSAO_ATUAL["papel"]
-    nome_torneio = obter_nome_torneio_db()
+def pagina_inicio_geral(request: Request, erro: str = None):
+    username = request.cookies.get("user")
+    if not username:
+        return RedirectResponse(url="/login", status_code=303)
     
-    if not user:
-        return f"""
-        <!DOCTYPE html>
-        <html lang="pt">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>{nome_torneio} - Acesso</title>
-            <style>
-                body {{ background: #0b0e14; color: #f0f6fc; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
-                .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 16px; width: 380px; padding: 35px; box-shadow: 0 12px 32px rgba(0,0,0,0.5); }}
-                input {{ width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #30363d; background: #0d1117; color: white; box-sizing: border-box; font-size: 14px; }}
-                input:focus {{ border-color: #238636; outline: none; }}
-                .btn {{ width: 100%; padding: 12px; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 15px; }}
-                .btn-green {{ background: #238636; color: white; }}
-                .btn-blue {{ background: #1f6beb; color: white; }}
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <h2 style="color: #2ea043; text-align: center; margin: 0; font-size: 28px; font-weight: 700;">🏆 {nome_torneio}</h2>
-                <p style="text-align: center; color: #8b949e; font-size: 13px; margin: 6px 0 25px 0;">Plataforma de Gestão de Campeonatos</p>
-                
-                <h3 style="font-size: 14px; margin-bottom: 10px; color: #c9d1d9;">Iniciar Sessão</h3>
-                <form action="/login" method="post" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 25px;">
-                    <input type="text" name="username" placeholder="Nome de Utilizador" required>
-                    <input type="password" name="senha" placeholder="Palavra-passe" required>
-                    <button type="submit" class="btn btn-green">Entrar</button>
-                </form>
+    torneios = carregar_torneios_db()
+    papel = next((u[4] for u in carregar_usuarios_db() if u[1] == username), "usuario")
+    torneios_visiveis = torneios if papel == 'admin' else [t for t in torneios if str(t[3]).lower() == username.lower()]
 
-                <hr style="border: 0; border-top: 1px solid #21262d; margin: 20px 0;">
+    if torneios_visiveis:
+        return RedirectResponse(url=f"/t/{torneios_visiveis[0][2]}", status_code=303)
 
-                <h3 style="font-size: 14px; margin-bottom: 10px; color: #c9d1d9;">Registar Novo Utilizador</h3>
-                <form action="/registar" method="post" style="display: flex; flex-direction: column; gap: 12px;">
-                    <input type="text" name="username" placeholder="Escolha um Utilizador" required>
-                    <input type="password" name="senha" placeholder="Palavra-passe (Mín. 6 caracteres)" required>
-                    <button type="submit" class="btn btn-blue">Criar Conta</button>
+    aviso_erro = f"<p style='color: #da3633; font-size: 13px;'>{erro}</p>" if erro else ""
+
+    html = f"""
+    <!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>Boas-Vindas</title>
+    <style>body {{ background: #0d1117; color: #c9d1d9; font-family: sans-serif; margin: 0; padding: 20px; }}
+    .container {{ max-width: 800px; margin: 50px auto; background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 25px; text-align: center; }}
+    input {{ width: 100%; padding: 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: white; box-sizing: border-box; margin-bottom: 10px; }}
+    button {{ background: #238636; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; cursor: pointer; width:100%; }}</style>
+    </head><body><div class="container">
+        <h2>🏆 Bem-vindo ao Torneios Auto, {username}</h2>
+        <p>Ainda não tens nenhum torneio criado nem integrado.</p>
+        {aviso_erro}
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-top:20px;">
+            <div style="background:#0d1117; padding:15px; border-radius:8px; border:1px solid #30363d;">
+                <h4>Criar Novo Torneio</h4>
+                <form action="/criar-torneio" method="post">
+                    <input type="text" name="nome_novo_torneio" placeholder="Nome do Torneio" required>
+                    <button type="submit">Criar</button>
                 </form>
             </div>
-        </body>
-        </html>
+            <div style="background:#0d1117; padding:15px; border-radius:8px; border:1px solid #30363d;">
+                <h4>Entrar por Código</h4>
+                <form action="/entrar-codigo" method="post">
+                    <input type="text" name="codigo_torneio" placeholder="Ex: TRN-ABC1234" required>
+                    <button type="submit" style="background:#1f6beb;">Aceder</button>
+                </form>
+            </div>
+        </div>
+    </div></body></html>
+    """
+    return resposta_html_sem_cache(html)
+
+@app.post("/entrar-codigo")
+def entrar_com_codigo(codigo_torneio: str = Form(...)):
+    codigo_limpo = codigo_torneio.strip().upper()
+    torneios = carregar_torneios_db()
+    t_encontrado = next((t for t in torneios if t[2].upper() == codigo_limpo), None)
+    if t_encontrado:
+        return RedirectResponse(url=f"/t/{t_encontrado[2]}", status_code=303)
+    return RedirectResponse(url="/?erro=Código+de+torneio+não+encontrado", status_code=303)
+
+@app.get("/t/{codigo_torneio}", response_class=HTMLResponse)
+def index_torneio(request: Request, codigo_torneio: str, tab: str = "painel", erro_inscricao: str = None, mod_sel: str = None):
+    username = request.cookies.get("user")
+    if not username:
+        return RedirectResponse(url="/login", status_code=303)
+    
+    torneios = carregar_torneios_db()
+    t_atual = next((t for t in torneios if t[2].upper() == codigo_torneio.upper()), None)
+    if not t_atual:
+        return RedirectResponse(url="/", status_code=303)
+    
+    t_id, nome_torneio, codigo_exibicao, criador_torneio = t_atual[0], t_atual[1], t_atual[2], t_atual[3]
+    papel_global = next((u[4] for u in carregar_usuarios_db() if u[1] == username), "usuario")
+    pode_gerir_torneio = (papel_global == 'admin') or (username.lower() == str(criador_torneio).lower())
+    torneios_visiveis_select = torneios if papel_global == 'admin' else [t for t in torneios if str(t[3]).lower() == username.lower()]
+
+    modalidades = carregar_modalidades_db(t_id)
+    series_turmas = carregar_series_turmas_db(t_id)
+    times = carregar_times_db(t_id)
+    confrontos = carregar_confrontos_db(t_id)
+    mensagens = carregar_mensagens_db(t_id)
+
+    modalidade_atual_nome = mod_sel if mod_sel else (modalidades[0][1] if modalidades else "")
+    mod_obj = next((m for m in modalidades if m[1] == modalidade_atual_nome), None)
+    
+    n_titulares = mod_obj[2] if mod_obj else 5
+    n_reservas = mod_obj[3] if mod_obj else 3
+
+    opcoes_modalidades = "".join([f"<option value='{m[1]}' {'selected' if m[1]==modalidade_atual_nome else ''}>{m[1]} (Titulares: {m[2]}, Reservas: {m[3]})</option>" for m in modalidades])
+    opcoes_series = "".join([f"<option value='{st[1]} - Turma {st[2]}'>{st[1]} (Turma {st[2]})</option>" for st in series_turmas])
+    if not opcoes_series:
+        opcoes_series = "<option value='3º - Turma A'>3º (Turma A)</option>"
+
+    opcoes_torneios_select = "".join([f"<option value='{t[2]}' {'selected' if t[2].upper()==codigo_torneio.upper() else ''}>{t[1]} ({t[2]})</option>" for t in torneios_visiveis_select])
+    erro_box = f"<div style='background:#da3633; color:white; padding:10px; border-radius:6px; margin-bottom:15px; font-size:13px;'>⚠️ {erro_inscricao}</div>" if erro_inscricao else ""
+
+    linhas_tabela = ""
+    for t in times:
+        participantes = carregar_participantes_time(t[0])
+        titulares_lista = [p[0] for p in participantes if p[1] == 'Titular']
+        reservas_lista = [p[0] for p in participantes if p[1] == 'Reserva']
+        
+        titulares_str = ", ".join(titulares_lista) if titulares_lista else "-"
+        reservas_str = ", ".join(reservas_lista) if reservas_lista else "-"
+        
+        botao_apagar = f"""<form action="/t/{codigo_exibicao}/apagar-time" method="post" style="display:inline;"><input type="hidden" name="time_id" value="{t[0]}"><button type="submit" style="background: #da3633; color:white; border:none; padding:4px 8px; border-radius:4px; cursor:pointer; font-size:11px;">Apagar</button></form>""" if pode_gerir_torneio else ""
+        status_tag = f" <span style='background:#da3633; color:white; padding:1px 5px; border-radius:3px; font-size:10px;'>DESCLASSIFICADA</span>" if t[14] == 'Desclassificada' else ""
+        
+        linhas_tabela += f"""
+            <tr style="border-bottom: 1px solid #21262d;">
+                <td style="padding: 12px; color: #f0f6fc; font-weight: 600;">{t[1]} <span style="font-size: 11px; color: #8b949e;">({t[3]} - {t[4]})</span>{status_tag}
+                    <div style="font-size: 11px; color: #3fb950; margin-top:4px;">⭐ <b>Titulares:</b> {titulares_str}</div>
+                    <div style="font-size: 11px; color: #58a6ff; margin-top:2px;">🔄 <b>Reservas:</b> {reservas_str}</div>
+                </td>
+                <td style="padding: 12px;"><span style="background: #1f6beb; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px;">{t[2]}</span></td>
+                <td style="padding: 12px; text-align: center; color: #3fb950; font-weight: 700;">{t[6]}</td>
+                <td style="padding: 12px; text-align: center; color: #c9d1d9;">{t[7]}</td>
+                <td style="padding: 12px; text-align: center;">{botao_apagar}</td>
+            </tr>
         """
 
-    modalidades = carregar_modalidades_db()
-    opcoes_modalidades = "".join([f"<option value='{mod[1]}'>{mod[1]} (Máx {mod[2]} atletas)</option>" for mod in modalidades])
+    lista_avisos_html = ""
+    for m in mensagens:
+        btn_del = f"""<form action="/t/{codigo_exibicao}/apagar-mensagem" method="post" style="display:inline;"><input type="hidden" name="msg_id" value="{m[0]}"><button type="submit" style="background:none; border:none; color:#da3633; cursor:pointer; font-size:11px;">Excluir</button></form>""" if pode_gerir_torneio else ""
+        lista_avisos_html += f"""
+            <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-bottom: 8px; font-size: 13px;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                    <span style="background: #1f6beb; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">{m[2]}</span>
+                    <div><span style="color: #8b949e; font-size: 11px;">Por: {m[1]}</span> {btn_del}</div>
+                </div>
+                <div style="color: #f0f6fc;">{m[3]}</div>
+            </div>
+        """
+
+    campos_titulares = "".join([f"<input type='text' name='titular_{i}' placeholder='Titular {i}' required style='margin-bottom:6px;'>" for i in range(1, n_titulares + 1)])
+    campos_reservas = "".join([f"<input type='text' name='reserva_{j}' placeholder='Reserva {j}' style='margin-bottom:6px;'>" for j in range(1, n_reservas + 1)]) if n_reservas > 0 else "<p style='color:#8b949e; font-size:12px;'>Sem reservas para esta modalidade.</p>"
+
+    mods_rows = "".join([f"<div style='display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #21262d; font-size:12px;'><span>{m[1]} (Titulares: {m[2]}, Reservas: {m[3]})</span><form action='/t/{codigo_exibicao}/apagar-modalidade' method='post'><input type='hidden' name='mod_id' value='{m[0]}'><button style='background:#da3633; color:white; border:none; font-size:10px;'>X</button></form></div>" for m in modalidades])
+    series_rows = "".join([f"<div style='display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #21262d; font-size:12px;'><span>{st[1]} (Turma {st[2]})</span><form action='/t/{codigo_exibicao}/apagar-serie-turma' method='post'><input type='hidden' name='st_id' value='{st[0]}'><button style='background:#da3633; color:white; border:none; font-size:10px;'>X</button></form></div>" for st in series_turmas])
+
+    botao_apagar_torneio = f"""
+    <form action="/t/{codigo_exibicao}/apagar-torneio" method="post" onsubmit="return confirm('Tens a certeza absoluta que pretendes apagar este campeonato por completo?');" style="margin:0;">
+        <button type="submit" style="background:#da3633; color:white; border:none; padding:6px 12px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px;">🗑️ Apagar Torneio</button>
+    </form>
+    """ if pode_gerir_torneio else ""
 
     painel_admin_html = ""
-    if papel == 'admin':
-        usuarios = carregar_usuarios_db()
-        lista_users_html = ""
-        for u in usuarios:
-            is_admin = (u[3] == 'admin')
-            novo_papel_alvo = 'aluno' if is_admin else 'admin'
-            texto_botao_papel = 'Tornar Aluno' if is_admin else 'Tornar Admin'
-            cor_botao_papel = '#da3633' if is_admin else '#238636'
-            
-            botao_apagar_user = f"""
-                <form action="/apagar-usuario" method="post" style="display:inline;">
-                    <input type="hidden" name="user_id" value="{u[0]}">
-                    <button type="submit" style="background: #da3633; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 11px;">Excluir</button>
-                </form>
-            """ if u[1] != 'admin' else "<span style='color: #484f58; font-size: 11px;'>Protegido</span>"
-
-            lista_users_html += f"""
-                <tr style="border-bottom: 1px solid #21262d;">
-                    <td style="padding: 10px; color: #f0f6fc; font-weight: 600;">{u[1]}</td>
-                    <td style="padding: 10px;"><span style="background: {'#8957e5' if is_admin else '#1f6beb'}; color: white; padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: 700;">{u[3].upper()}</span></td>
-                    <td style="padding: 10px;">
-                        <form action="/alterar-papel" method="post" style="display:inline;">
-                            <input type="hidden" name="user_id" value="{u[0]}">
-                            <input type="hidden" name="novo_papel" value="{novo_papel_alvo}">
-                            <button type="submit" style="background: {cor_botao_papel}; color: white; border: none; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 11px;">{texto_botao_papel}</button>
-                        </form>
-                    </td>
-                    <td style="padding: 10px;">
-                        <form action="/reset-senha" method="post" style="display: flex; gap: 6px;">
-                            <input type="hidden" name="user_id" value="{u[0]}">
-                            <input type="text" name="nova_senha" placeholder="Nova senha" required style="padding: 4px 6px; background: #0d1117; color: white; border: 1px solid #30363d; border-radius: 6px; width: 90px; font-size: 11px;">
-                            <button type="submit" style="background: #d29922; color: white; border: none; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 11px;">Redefinir</button>
-                        </form>
-                    </td>
-                    <td style="padding: 10px; text-align: center;">{botao_apagar_user}</td>
-                </tr>
-            """
-
-        lista_mods_html = ""
-        for mod in modalidades:
-            lista_mods_html += f"""
-                <tr style="border-bottom: 1px solid #21262d;">
-                    <td style="padding: 10px; color: #f0f6fc; font-weight: 600;">{mod[1]}</td>
-                    <td style="padding: 10px;">
-                        <form action="/atualizar-limite" method="post" style="display: flex; gap: 8px; align-items: center;">
-                            <input type="hidden" name="mod_id" value="{mod[0]}">
-                            <input type="number" name="novo_limite" value="{mod[2]}" min="1" max="50" style="padding: 5px; width: 70px; background: #0d1117; color: white; border: 1px solid #30363d; border-radius: 6px; text-align: center; font-size: 13px;">
-                            <button type="submit" style="background: #238636; color: white; border: none; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 11px;">Salvar</button>
-                        </form>
-                    </td>
-                    <td style="padding: 10px; text-align: center;">
-                        <form action="/apagar-modalidade" method="post" style="display:inline;">
-                            <input type="hidden" name="mod_id" value="{mod[0]}">
-                            <button type="submit" style="background: #da3633; color: white; border: none; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 11px;">Remover</button>
-                        </form>
-                    </td>
-                </tr>
-            """
-        
+    if pode_gerir_torneio:
         painel_admin_html = f"""
-        <div style="background: #161b22; padding: 25px; border-radius: 12px; margin-top: 25px; border: 1px solid #d29922; box-shadow: 0 8px 24px rgba(0,0,0,0.4);">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; border-bottom: 1px solid #30363d; padding-bottom: 12px;">
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <span style="font-size: 22px;">🛡️</span>
-                    <h2 style="color: #d29922; margin: 0; font-size: 20px; font-weight: 700;">Painel de Administração Avançado</h2>
-                </div>
-                <!-- Formulário para Alterar Nome do Torneio -->
-                <form action="/atualizar-nome-torneio" method="post" style="display: flex; gap: 8px; align-items: center;">
-                    <input type="text" name="novo_nome" value="{nome_torneio}" required placeholder="Nome do Torneio" style="padding: 6px 10px; font-size: 12px; width: 180px;">
-                    <button type="submit" style="background: #1f6beb; color: white; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 12px;">Alterar Nome</button>
-                </form>
+        <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; margin-bottom: 25px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h3 style="color: #f0f6fc; margin: 0;">🛡️ Configurar Modalidades e Vagas</h3>
+                {botao_apagar_torneio}
             </div>
-
-            <div style="display: flex; gap: 25px; flex-wrap: wrap; margin-top: 20px;">
-                <div style="flex: 1.5; min-width: 380px;">
-                    <h3 style="color: #c9d1d9; font-size: 15px; margin-bottom: 10px;">Gestão de Utilizadores, Permissões e Exclusão</h3>
-                    <div style="overflow-x: auto; max-height: 250px; overflow-y: auto;">
-                        <table style="width: 100%; border-collapse: collapse;">
-                            <thead>
-                                <tr style="background: #0d1117; text-align: left; color: #8b949e; font-size: 11px; text-transform: uppercase;">
-                                    <th style="padding: 8px;">Utilizador</th>
-                                    <th style="padding: 8px;">Cargo</th>
-                                    <th style="padding: 8px;">Permissão</th>
-                                    <th style="padding: 8px;">Senha</th>
-                                    <th style="padding: 8px; text-align: center;">Excluir</th>
-                                </tr>
-                            </thead>
-                            <tbody>{lista_users_html}</tbody>
-                        </table>
-                    </div>
-                </div>
-                <div style="flex: 1; min-width: 300px;">
-                    <h3 style="color: #c9d1d9; font-size: 15px; margin-bottom: 10px;">Gerir Limites por Modalidade</h3>
-                    <form action="/adicionar-modalidade" method="post" style="display: flex; gap: 8px; margin-bottom: 12px;">
-                        <input type="text" name="nome_mod" placeholder="Nova modalidade..." required style="flex: 2; padding: 6px 10px; font-size: 12px;">
-                        <input type="number" name="limite_mod" placeholder="Máx" value="10" min="1" required style="flex: 1; padding: 6px 10px; font-size: 12px; text-align: center;">
-                        <button type="submit" style="background: #1f6beb; color: white; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px;">Adicionar</button>
+            <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px;">
+                <div>
+                    <h4 style="color: #8b949e; font-size: 13px;">Adicionar Nova Modalidade com Vagas Específicas</h4>
+                    <form action="/t/{codigo_exibicao}/adicionar-modalidade" method="post" style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 8px; align-items: flex-end;">
+                        <div><label style="font-size:11px; color:#8b949e;">Nome:</label><input type="text" name="nome_mod" placeholder="Ex: Futsal" required style="padding:6px;"></div>
+                        <div><label style="font-size:11px; color:#8b949e;">Titulares:</label><input type="number" name="titulares" value="5" min="1" required style="padding:6px;"></div>
+                        <div><label style="font-size:11px; color:#8b949e;">Reservas:</label><input type="number" name="reservas" value="3" min="0" required style="padding:6px;"></div>
+                        <div><button type="submit" style="background:#238636; color:white; border:none; padding:8px; border-radius:6px; font-weight:bold; cursor:pointer;">Criar</button></div>
                     </form>
-                    <div style="overflow-x: auto; max-height: 200px; overflow-y: auto;">
-                        <table style="width: 100%; border-collapse: collapse;">
-                            <thead>
-                                <tr style="background: #0d1117; text-align: left; color: #8b949e; font-size: 11px; text-transform: uppercase;">
-                                    <th style="padding: 8px;">Modalidade</th>
-                                    <th style="padding: 8px;">Limite</th>
-                                    <th style="padding: 8px; text-align: center;">Ação</th>
-                                </tr>
-                            </thead>
-                            <tbody>{lista_mods_html}</tbody>
-                        </table>
-                    </div>
+                    <div style="max-height: 120px; overflow-y: auto; margin-top: 10px;">{mods_rows}</div>
+                </div>
+                <div>
+                    <h4 style="color: #8b949e; font-size: 13px;">Séries/Turmas</h4>
+                    <form action="/t/{codigo_exibicao}/adicionar-serie-turma" method="post" style="display: flex; gap: 4px; margin-bottom: 6px;">
+                        <input type="text" name="nome_serie" placeholder="Série" required style="flex:2; padding:6px; font-size:11px;">
+                        <input type="text" name="letra" placeholder="A" required style="flex:1; padding:6px; font-size:11px;">
+                        <button type="submit" style="background:#238636; color:white; border:none; padding:6px; font-size:11px;">+</button>
+                    </form>
+                    <div style="max-height: 100px; overflow-y: auto;">{series_rows}</div>
                 </div>
             </div>
         </div>
         """
 
-    times = carregar_times_db()
-    total_equipas = len(times)
-    total_usuarios = len(carregar_usuarios_db())
+    html = f"""
+    <!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><title>{nome_torneio}</title>
+    <style>
+        body {{ background: #0d1117; color: #c9d1d9; font-family: sans-serif; margin: 0; padding: 20px; }}
+        .container {{ max-width: 1100px; margin: 0 auto; }}
+        .header, .multi-bar, .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
+        .nav-tabs {{ display: flex; gap: 10px; margin-bottom: 20px; }}
+        .tab-btn {{ background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 10px 20px; border-radius: 8px; font-weight: 600; text-decoration: none; }}
+        .tab-btn.active {{ background: #238636; color: white; }}
+        input, select, textarea {{ width: 100%; padding: 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; box-sizing: border-box; margin-bottom: 10px; }}
+        .btn-green {{ background: #238636; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }}
+    </style>
+    <script>
+        function mudarTorneio(select) {{ if(select.value) window.location.href = '/t/' + select.value + '?tab={tab}'; }}
+        function mudarModalidadeForm(select) {{
+            window.location.href = '/t/{codigo_exibicao}?tab=painel&mod_sel=' + encodeURIComponent(select.value);
+        }}
+    </script>
+    </head><body>
+        <div class="container">
+            <div class="header" style="display:flex; justify-content:space-between; align-items:center;">
+                <div><h1 style="margin:0; color:white;">🏆 {nome_torneio}</h1><p style="margin:4px 0 0; font-size:12px; color:#8b949e;">Código: <b>{codigo_exibicao}</b></p></div>
+                <div><span>{username}</span> | <a href="/logout" style="color:#da3633; font-weight:bold;">Sair</a></div>
+            </div>
 
-    linhas_tabela = ""
-    for t in times:
-        botao_apagar = f"""<form action="/apagar-time" method="post" style="display:inline;"><input type="hidden" name="nome_time" value="{t[0]}"><button type="submit" style="background: #da3633; color:white; border:none; padding:6px 12px; border-radius:6px; cursor:pointer; font-weight:600; font-size:12px;">Apagar</button></form>""" if papel == 'admin' else "<span style='color: #484f58; font-size: 12px;'>Protegido</span>"
-        linhas_tabela += f"""
-            <tr style="border-bottom: 1px solid #21262d;">
-                <td style="padding: 14px; color: #f0f6fc; font-weight: 600;">{t[0]}</td>
-                <td style="padding: 14px; color: #8b949e;">{t[1]}</td>
-                <td style="padding: 14px; text-align: center; color: #3fb950; font-weight: 700; font-size: 16px;">{t[2]}</td>
-                <td style="padding: 14px; text-align: center; color: #c9d1d9;">{t[3]}</td>
-                <td style="padding: 14px; text-align: center;">{botao_apagar}</td>
-            </tr>
-        """
-    if not linhas_tabela:
-        linhas_tabela = "<tr><td colspan='5' style='text-align: center; padding: 30px; color: #8b949e;'>Nenhuma equipa registada no torneio até ao momento.</td></tr>"
-
-    confrontos = carregar_confrontos_db()
-    confrontos_html = ""
-    for c in confrontos:
-        status_cor = '#3fb950' if c[6] == 'Finalizado' else '#d29922'
-        gabarito_edicao = f"""
-            <form action="/atualizar-resultado" method="post" style="display: flex; gap: 5px; align-items: center; justify-content: center;">
-                <input type="hidden" name="conf_id" value="{c[0]}">
-                <input type="number" name="gols1" value="{c[4]}" min="0" style="width: 45px; text-align: center; background: #0d1117; color: white; border: 1px solid #30363d; border-radius: 4px; padding: 4px;">
-                <span>x</span>
-                <input type="number" name="gols2" value="{c[5]}" min="0" style="width: 45px; text-align: center; background: #0d1117; color: white; border: 1px solid #30363d; border-radius: 4px; padding: 4px;">
-                <button type="submit" style="background: #1f6beb; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;">Salvar</button>
-            </form>
-        """ if papel == 'admin' else f"<b style='color: #fff;'>{c[4]} x {c[5]}</b>"
-
-        confrontos_html += f"""
-            <tr style="border-bottom: 1px solid #21262d;">
-                <td style="padding: 12px; color: #58a6ff; font-weight: 600;">{c[1]}</td>
-                <td style="padding: 12px; text-align: right; color: #f0f6fc; font-weight: bold;">{c[2]}</td>
-                <td style="padding: 12px; text-align: center;">{gabarito_edicao}</td>
-                <td style="padding: 12px; text-align: left; color: #f0f6fc; font-weight: bold;">{c[3]}</td>
-                <td style="padding: 12px; text-align: center;"><span style="background: {status_cor}; color: white; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold;">{c[6]}</span></td>
-            </tr>
-        """
-    if not confrontos_html:
-        confrontos_html = "<tr><td colspan='5' style='text-align: center; padding: 30px; color: #8b949e;'>Ainda não foram gerados confrontos.</td></tr>"
-
-    btn_gerar_confrontos = f"""
-        <form action="/gerar-confrontos" method="post" style="margin-bottom: 20px;">
-            <button type="submit" style="background: #238636; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px;">⚡ Gerar Confrontos & Chaveamento Automático</button>
-        </form>
-    """ if papel == 'admin' else ""
-
-    chaveamento_cards = ""
-    for c in confrontos:
-        vencedor = "A definir"
-        if c[6] == 'Finalizado':
-            if c[4] > c[5]: vencedor = f"🏆 {c[2]}"
-            elif c[5] > c[4]: vencedor = f"🏆 {c[3]}"
-            else: vencedor = "Empate / Penáltis"
-
-        chaveamento_cards += f"""
-            <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 15px; width: 260px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
-                <div style="font-size: 11px; color: #8b949e; text-transform: uppercase; font-weight: bold; margin-bottom: 8px;">Modalidade: {c[1]}</div>
-                <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 14px;">
-                    <span>{c[2]}</span> <b>{c[4]}</b>
-                </div>
-                <div style="display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px;">
-                    <span>{c[3]}</span> <b>{c[5]}</b>
-                </div>
-                <div style="margin-top: 10px; font-size: 12px; color: #3fb950; text-align: center; background: #161b22; padding: 5px; border-radius: 6px;">
-                    Vencedor: <b>{vencedor}</b>
+            <div class="multi-bar" style="display:flex; justify-content:space-between; align-items:center;">
+                <select onchange="mudarTorneio(this)" style="width:260px; margin:0;">{opcoes_torneios_select}</select>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <form action="/entrar-codigo" method="post" style="display:flex; gap:6px; margin:0;">
+                        <input type="text" name="codigo_torneio" placeholder="Código (Ex: TRN-ABC1234)" required style="width:170px; margin:0; padding:6px; font-size:11px;">
+                        <button type="submit" style="background:#1f6beb; color:white; border:none; padding:6px 10px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:11px;">Entrar</button>
+                    </form>
+                    <form action="/criar-torneio" method="post" style="display:flex; gap:6px; margin:0;">
+                        <input type="text" name="nome_novo_torneio" placeholder="Novo Torneio" required style="width:140px; margin:0; padding:6px; font-size:11px;">
+                        <button type="submit" style="background:#238636; color:white; border:none; padding:6px 10px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:11px;">Criar</button>
+                    </form>
                 </div>
             </div>
-        """
-    if not chaveamento_cards:
-        chaveamento_cards = "<p style='color: #8b949e; text-align: center; width: 100%;'>Nenhum chaveamento gerado ainda.</p>"
 
-    conteudo_aba = ""
-    if tab == "confrontos":
-        conteudo_aba = f"""
-            <div class="card">
-                <h3 style="margin-top: 0; color: #f0f6fc; font-size: 18px; font-weight: 700; margin-bottom: 15px;">⚔️ Gestão de Confrontos e Resultados</h3>
-                {btn_gerar_confrontos}
-                <div style="overflow-x: auto;">
-                    <table style="width: 100%; border-collapse: collapse;">
-                        <thead>
-                            <tr style="background: #0d1117; text-align: left; color: #8b949e; font-size: 12px; text-transform: uppercase;">
-                                <th style="padding: 12px;">Modalidade</th>
-                                <th style="padding: 12px; text-align: right;">Equipa A</th>
-                                <th style="padding: 12px; text-align: center;">Placar</th>
-                                <th style="padding: 12px; text-align: left;">Equipa B</th>
-                                <th style="padding: 12px; text-align: center;">Estado</th>
-                            </tr>
-                        </thead>
-                        <tbody>{confrontos_html}</tbody>
-                    </table>
-                </div>
-            </div>
-        """
-    elif tab == "chaveamento":
-        conteudo_aba = f"""
-            <div class="card">
-                <h3 style="margin-top: 0; color: #f0f6fc; font-size: 18px; font-weight: 700; margin-bottom: 15px;">🌳 Chaveamento Oficial do Torneio (Mata-Mata)</h3>
-                <p style="color: #8b949e; font-size: 13px; margin-bottom: 20px;">Visualização em árvore dos confrontos eliminatórios do torneio.</p>
-                <div style="display: flex; gap: 20px; flex-wrap: wrap;">{chaveamento_cards}</div>
-            </div>
-        """
-    else:
-        mensagens = carregar_mensagens_db()
-        mensagens_filtradas = []
-        for m in mensagens:
-            if filtro == "todos": mensagens_filtradas.append(m)
-            elif filtro == "jogos" and m[2] == "Resultados & Jogos": mensagens_filtradas.append(m)
-            elif filtro == "datas" and m[2] == "Datas & Prazos": mensagens_filtradas.append(m)
-            elif filtro == "avisos" and m[2] == "Avisos Gerais": mensagens_filtradas.append(m)
-
-        lista_mural_html = ""
-        for m in mensagens_filtradas:
-            btn_del_msg = f"""<form action="/apagar-msg" method="post" style="display:inline;"><input type="hidden" name="msg_id" value="{m[0]}"><button type="submit" style="background: #da3633; color:white; border:none; padding:2px 6px; border-radius:4px; font-size:10px; cursor:pointer; font-weight:bold;">X</button></form>""" if papel == 'admin' else ""
-            conteudo_seguro = m[3].replace('"', '&quot;').replace("'", "&#39;")
-            badge_cor = "#58a6ff" if m[2] == "Avisos Gerais" else ("#3fb950" if m[2] == "Resultados & Jogos" else "#d29922")
-            
-            lista_mural_html += f"""
-                <div style="background: #0d1117; padding: 12px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #30363d; border-left: 4px solid {badge_cor};">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
-                        <div>
-                            <span style="background: {badge_cor}; color: #000; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-right: 6px;">{m[2]}</span>
-                            <strong style="color: #c9d1d9; font-size: 12px;">{m[1]}</strong>
-                        </div>
-                        <div style="display: flex; gap: 6px; align-items: center;">
-                            <button onclick="abrirModal('{m[1]}', '{m[2]}', '{conteudo_seguro}')" style="background: #21262d; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer;">🔍 Lupa</button>
-                            {btn_del_msg}
-                        </div>
-                    </div>
-                    <p style="margin: 0; color: #f0f6fc; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px;">{m[3]}</p>
-                </div>
-            """
-
-        if not lista_mural_html:
-            lista_mural_html = "<p style='color: #8b949e; text-align: center; margin-top: 40px; font-size: 13px;'>Nenhuma publicação encontrada nesta categoria.</p>"
-
-        form_publicacao_html = ""
-        if papel == 'admin':
-            form_publicacao_html = f"""
-                <form action="/enviar-msg" method="post" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px; background: #0d1117; padding: 12px; border-radius: 8px; border: 1px solid #30363d;">
-                    <select name="categoria" style="padding: 6px; font-size: 12px;">
-                        <option value="Avisos Gerais">📢 Avisos Gerais</option>
-                        <option value="Resultados & Jogos">⚽ Resultados & Jogos</option>
-                        <option value="Datas & Prazos">📅 Datas & Prazos</option>
-                    </select>
-                    <div style="display: flex; gap: 8px;">
-                        <input type="text" name="conteudo" placeholder="Escreva o comunicado oficial..." required style="flex: 1; padding: 8px; font-size: 13px;">
-                        <button type="submit" class="btn-action btn-blue" style="padding: 8px 14px; font-size: 13px;">Publicar</button>
-                    </div>
-                </form>
-            """
-
-        btn_todos = "background: #1f6beb; color: white;" if filtro == "todos" else "background: #21262d; color: #c9d1d9;"
-        btn_jogos = "background: #3fb950; color: white;" if filtro == "jogos" else "background: #21262d; color: #c9d1d9;"
-        btn_datas = "background: #d29922; color: white;" if filtro == "datas" else "background: #21262d; color: #c9d1d9;"
-        btn_avisos = "background: #58a6ff; color: white;" if filtro == "avisos" else "background: #21262d; color: #c9d1d9;"
-
-        conteudo_aba = f"""
-            <div style="display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap;">
-                <div style="flex: 1; background: #161b22; padding: 18px 22px; border-radius: 10px; border: 1px solid #30363d; border-left: 4px solid #3fb950;">
-                    <span style="color: #8b949e; font-size: 11px; font-weight: 700; text-transform: uppercase;">Equipas Inscritas</span>
-                    <h3 style="margin: 6px 0 0 0; color: #3fb950; font-size: 24px; font-weight: 800;">{total_equipas}</h3>
-                </div>
-                <div style="flex: 1; background: #161b22; padding: 18px 22px; border-radius: 10px; border: 1px solid #30363d; border-left: 4px solid #58a6ff;">
-                    <span style="color: #8b949e; font-size: 11px; font-weight: 700; text-transform: uppercase;">Utilizadores Registados</span>
-                    <h3 style="margin: 6px 0 0 0; color: #58a6ff; font-size: 24px; font-weight: 800;">{total_usuarios}</h3>
-                </div>
+            <div class="nav-tabs">
+                <a href="/t/{codigo_exibicao}?tab=painel" class="tab-btn {'active' if tab=='painel' else ''}">📊 Painel & Inscrições</a>
+                <a href="/t/{codigo_exibicao}?tab=confrontos" class="tab-btn {'active' if tab=='confrontos' else ''}">⚔️ Confrontos</a>
+                <a href="/t/{codigo_exibicao}?tab=resultados" class="tab-btn {'active' if tab=='resultados' else ''}">🏆 Tabela & Resultados</a>
             </div>
 
             {painel_admin_html}
 
-            <div style="display: flex; gap: 20px; margin-top: 25px; flex-wrap: wrap;">
-                <div class="card" style="flex: 1; min-width: 320px;">
-                    <h3 style="margin-top: 0; color: #f0f6fc; border-bottom: 2px solid #238636; padding-bottom: 10px; font-size: 17px; font-weight: 700;">Registar Equipa</h3>
-                    <form action="/adicionar-equipa" method="post" style="display: flex; flex-direction: column; gap: 14px; margin-top: 15px;">
+            {f'''
+            {erro_box}
+            <div style="display:grid; grid-template-columns: 2fr 1fr; gap:20px;">
+                <div class="card">
+                    <h3 style="margin-top:0; color:white;">Criar Nova Equipa e Preencher Participantes</h3>
+                    <form action="/t/{codigo_exibicao}/adicionar-equipa" method="post" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
                         <div>
-                            <label style="font-size: 13px; color: #8b949e; display: block; margin-bottom: 6px;">Nome da Equipa:</label>
-                            <input type="text" name="nome_time" placeholder="ex: Leões FC" required>
+                            <label style="font-size:12px; color:#8b949e;">Modalidade:</label>
+                            <select name="modalidade" onchange="mudarModalidadeForm(this)">{opcoes_modalidades}</select>
+                            <label style="font-size:12px; color:#8b949e;">Nome da Equipa:</label><input type="text" name="nome_time" required>
+                            <label style="font-size:12px; color:#8b949e;">Turma:</label><select name="serie_turma_escolhida">{opcoes_series}</select>
+                            <label style="font-size:12px; color:#8b949e;">Logo URL (Opcional):</label><input type="text" name="logo_url">
+                            <button type="submit" class="btn-green" style="margin-top:10px;">Criar Equipa</button>
                         </div>
                         <div>
-                            <label style="font-size: 13px; color: #8b949e; display: block; margin-bottom: 6px;">Selecione a Modalidade:</label>
-                            <select name="modalidade">{opcoes_modalidades}</select>
+                            <h4 style="color:#3fb950; margin-top:0; font-size:13px;">⭐ Titulares ({n_titulares})</h4>
+                            {campos_titulares}
+                            <h4 style="color:#58a6ff; margin-top:10px; font-size:13px;">🔄 Reservas ({n_reservas})</h4>
+                            {campos_reservas}
                         </div>
-                        <button type="submit" class="btn-action btn-green" style="margin-top: 5px;">Inscrever Equipa no Torneio</button>
                     </form>
                 </div>
 
-                <div class="card" style="flex: 1.3; min-width: 350px;">
-                    <h3 style="margin-top: 0; color: #f0f6fc; border-bottom: 2px solid #1f6beb; padding-bottom: 10px; font-size: 17px; font-weight: 700;">Mural Oficial de Avisos e Jogos</h3>
-                    
-                    <div style="display: flex; gap: 6px; margin-bottom: 15px; flex-wrap: wrap;">
-                        <a href="/?tab=painel&filtro=todos" style="padding: 5px 10px; border-radius: 6px; text-decoration: none; font-size: 11px; font-weight: bold; {btn_todos}">🌐 Todos</a>
-                        <a href="/?tab=painel&filtro=jogos" style="padding: 5px 10px; border-radius: 6px; text-decoration: none; font-size: 11px; font-weight: bold; {btn_jogos}">⚽ Jogos</a>
-                        <a href="/?tab=painel&filtro=datas" style="padding: 5px 10px; border-radius: 6px; text-decoration: none; font-size: 11px; font-weight: bold; {btn_datas}">📅 Datas</a>
-                        <a href="/?tab=painel&filtro=avisos" style="padding: 5px 10px; border-radius: 6px; text-decoration: none; font-size: 11px; font-weight: bold; {btn_avisos}">📢 Avisos</a>
-                    </div>
-
-                    {form_publicacao_html}
-
-                    <div style="max-height: 250px; overflow-y: auto; padding-right: 5px;">
-                        {lista_mural_html}
+                <div class="card">
+                    <h3 style="margin-top:0; color:white; font-size:16px;">📢 Mural de Avisos</h3>
+                    {f'''
+                    <form action="/t/{codigo_exibicao}/publicar-mensagem" method="post" style="margin-bottom:12px;">
+                        <select name="categoria" style="padding:6px; font-size:11px;"><option value="Avisos Gerais">📢 Aviso Geral</option><option value="Regras">📜 Regras</option></select>
+                        <input type="text" name="conteudo" placeholder="Escrever comunicado..." required style="padding:6px; font-size:11px;">
+                        <button type="submit" style="background:#238636; color:white; border:none; padding:6px; border-radius:4px; font-weight:bold; cursor:pointer; width:100%; font-size:11px;">Publicar</button>
+                    </form>
+                    ''' if pode_gerir_torneio else ""}
+                    <div style="max-height: 220px; overflow-y: auto;">
+                        {lista_avisos_html if lista_avisos_html else "<p style='color:#8b949e; text-align:center; font-size:12px;'>Nenhum aviso publicado.</p>"}
                     </div>
                 </div>
             </div>
+            ''' if tab=='painel' else ""}
 
-            <div class="card" style="margin-top: 25px;">
-                <h3 style="margin-top: 0; color: #f0f6fc; font-size: 18px; font-weight: 700; margin-bottom: 15px;">Equipas Inscritas</h3>
-                <div style="overflow-x: auto;">
-                    <table style="width: 100%; border-collapse: collapse;">
-                        <thead>
-                            <tr style="background: #0d1117; text-align: left; color: #8b949e; font-size: 12px; text-transform: uppercase;">
-                                <th style="padding: 12px;">Equipa</th>
-                                <th style="padding: 12px;">Modalidade</th>
-                                <th style="padding: 12px; text-align: center;">Pontos</th>
-                                <th style="padding: 12px; text-align: center;">Jogos</th>
-                                <th style="padding: 12px; text-align: center;">Ações</th>
-                            </tr>
-                        </thead>
-                        <tbody>{linhas_tabela}</tbody>
-                    </table>
-                </div>
+            {f'''
+            <div class="card">
+                <h3 style="margin-top:0; color:white;">Tabela de Classificação</h3>
+                <table style="width:100%; border-collapse:collapse;">
+                    <tr style="background:#0d1117; color:#8b949e; font-size:12px; text-align:left;">
+                        <th style="padding:10px;">EQUIPA / PARTICIPANTES</th><th>MODALIDADE</th><th style="text-align:center;">PONTOS</th><th style="text-align:center;">JOGOS</th><th style="text-align:center;">AÇÃO</th>
+                    </tr>
+                    {linhas_tabela if linhas_tabela else "<tr><td colspan='5' style='text-align:center; padding:20px; color:#8b949e;'>Nenhuma equipa inscrita.</td></tr>"}
+                </table>
             </div>
-        """
+            ''' if tab=='resultados' else ""}
 
-    active_painel = "background: #238636; color: white;" if tab == "painel" else "background: #21262d; color: #c9d1d9;"
-    active_conf = "background: #238636; color: white;" if tab == "confrontos" else "background: #21262d; color: #c9d1d9;"
-    active_chave = "background: #238636; color: white;" if tab == "chaveamento" else "background: #21262d; color: #c9d1d9;"
-
-    return f"""
-    <!DOCTYPE html>
-    <html lang="pt">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{nome_torneio} - Painel Geral</title>
-        <style>
-            body {{ background-color: #0b0e14; color: #f0f6fc; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; margin: 0; padding: 30px 15px; }}
-            .container {{ max-width: 1050px; margin: auto; }}
-            .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 25px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); }}
-            input, select, textarea {{ width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: white; box-sizing: border-box; font-size: 14px; }}
-            input:focus, select:focus, textarea:focus {{ border-color: #3fb950; outline: none; }}
-            .btn-action {{ padding: 10px 18px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 14px; transition: 0.2s; }}
-            .btn-green {{ background: #238636; color: white; }}
-            .btn-blue {{ background: #1f6beb; color: white; }}
-            .nav-tab {{ padding: 8px 16px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 13px; }}
-            
-            .modal-overlay {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); justify-content: center; align-items: center; z-index: 1000; }}
-            .modal-content {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px; width: 90%; max-width: 500px; padding: 25px; box-shadow: 0 12px 32px rgba(0,0,0,0.6); }}
-        </style>
-        <script>
-            function abrirModal(autor, categoria, texto) {{
-                document.getElementById('modalAutor').innerText = "Autor: " + autor;
-                document.getElementById('modalCategoria').innerText = "Categoria: " + categoria;
-                document.getElementById('modalTexto').innerText = texto;
-                document.getElementById('modalAviso').style.display = 'flex';
-            }}
-            function fecharModal() {{
-                document.getElementById('modalAviso').style.display = 'none';
-            }}
-        </script>
-    </head>
-    <body>
-        <div class="container">
-            
-            <div style="display: flex; justify-content: space-between; align-items: center; background: #161b22; padding: 20px 25px; border-radius: 12px; border: 1px solid #30363d; margin-bottom: 20px;">
-                <div>
-                    <h1 style="color: #3fb950; margin: 0; font-size: 26px; font-weight: 800;">🏆 {nome_torneio}</h1>
-                    <p style="margin: 4px 0 0 0; color: #8b949e; font-size: 13px;">Sistema Automatizado de Gestão de Torneios</p>
+            {f'''
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                    <h3 style="margin:0; color:white;">Agenda de Confrontos</h3>
+                    {f"<form action='/t/{codigo_exibicao}/gerar-confrontos' method='post'><button type='submit' class='btn-green' style='padding:6px 14px;'>Gerar Confrontos</button></form>" if pode_gerir_torneio else ""}
                 </div>
-                <div style="display: flex; align-items: center; gap: 15px;">
-                    <div style="text-align: right;">
-                        <span style="display: block; font-size: 14px; color: #f0f6fc; font-weight: 600;">{user}</span>
-                        <span style="font-size: 10px; background: {'#8957e5' if papel=='admin' else '#1f6beb'}; padding: 2px 8px; border-radius: 12px; font-weight: 800;">{papel.upper()}</span>
+                <div style="display:flex; flex-direction:column; gap:10px;">
+                    {"".join([f'''
+                    <div style="background:#0d1117; padding:12px; border-radius:8px; border:1px solid #30363d; display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                            <span style="background:#1f6beb; color:white; padding:2px 6px; border-radius:4px; font-size:10px;">{c[1]}</span>
+                            <b style="color:white; margin-left:8px;">{c[2]} vs {c[3]}</b>
+                        </div>
+                        <div>
+                            {f"<form action='/t/{codigo_exibicao}/atualizar-resultado' method='post' style='display:flex; gap:6px;'><input type='hidden' name='conf_id' value='{c[0]}'><input type='text' name='data_hora' value='{c[6]}' style='width:65px; padding:3px; font-size:11px;'><input type='text' name='local' value='{c[7]}' style='width:60px; padding:3px; font-size:11px;'><input type='number' name='gols1' value='{c[4]}' style='width:30px; text-align:center;'><input type='number' name='gols2' value='{c[5]}' style='width:30px; text-align:center;'><select name='status_opcao' style='width:90px; font-size:10px;'><option value='Finalizado'>Normal</option><option value='Desclassificar T1'>Punir T1</option><option value='Desclassificar T2'>Punir T2</option></select><button type='submit' style='background:#238636; color:white; border:none; padding:3px 6px; font-size:11px;'>Salvar</button></form>" if pode_gerir_torneio else f"<span style='color:#3fb950; font-weight:bold;'>{c[4]} - {c[5]}</span>"}
+                        </div>
                     </div>
-                    <a href="/logout" style="background: #da3633; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 600;">Sair</a>
+                    ''' for c in confrontos]) if confrontos else "<p style='color:#8b949e; text-align:center;'>Nenhum confronto gerado.</p>"}
                 </div>
             </div>
-
-            <div style="display: flex; gap: 10px; margin-bottom: 25px;">
-                <a href="/?tab=painel" class="nav-tab" style="{active_painel}">🏠 Painel & Inscrições</a>
-                <a href="/?tab=confrontos" class="nav-tab" style="{active_conf}">⚔️ Confrontos & Jogos</a>
-                <a href="/?tab=chaveamento" class="nav-tab" style="{active_chave}">🌳 Chaveamento / Mata-Mata</a>
-            </div>
-
-            {conteudo_aba}
-
+            ''' if tab=='confrontos' else ""}
         </div>
-
-        <div id="modalAviso" class="modal-overlay">
-            <div class="modal-content">
-                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 15px;">
-                    <h3 style="margin: 0; color: #3fb950; font-size: 18px;">🔍 Detalhe do Comunicado</h3>
-                    <button onclick="fecharModal()" style="background: #da3633; color: white; border: none; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-weight: bold;">X</button>
-                </div>
-                <div style="margin-bottom: 15px;">
-                    <span id="modalCategoria" style="background: #1f6beb; color: white; font-size: 11px; padding: 3px 8px; border-radius: 4px; font-weight: bold;"></span>
-                    <span id="modalAutor" style="color: #8b949e; font-size: 12px; margin-left: 10px;"></span>
-                </div>
-                <p id="modalTexto" style="color: #f0f6fc; font-size: 15px; line-height: 1.5; background: #0d1117; padding: 15px; border-radius: 8px; border: 1px solid #30363d; word-break: break-word;"></p>
-                <div style="text-align: right; margin-top: 20px;">
-                    <button onclick="fecharModal()" class="btn-action btn-blue" style="padding: 6px 16px; font-size: 13px;">Fechar</button>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
+    </body></html>
     """
+    return resposta_html_sem_cache(html)
 
-@app.post("/atualizar-nome-torneio")
-def atualizar_nome_torneio(novo_nome: str = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin':
-        atualizar_nome_torneio_db(novo_nome.strip())
+@app.post("/criar-torneio")
+def criar_novo_torneio(request: Request, nome_novo_torneio: str = Form(...)):
+    username = request.cookies.get("user") or "admin"
+    ok, cod = criar_torneio_db(nome_novo_torneio.strip(), username)
+    return RedirectResponse(url=f"/t/{cod}", status_code=303)
+
+@app.post("/entrar-codigo")
+def entrar_com_codigo(codigo_torneio: str = Form(...)):
+    codigo_limpo = codigo_torneio.strip().upper()
+    torneios = carregar_torneios_db()
+    t_encontrado = next((t for t in torneios if t[2].upper() == codigo_limpo), None)
+    if t_encontrado:
+        return RedirectResponse(url=f"/t/{t_encontrado[2]}", status_code=303)
+    return RedirectResponse(url="/?erro=Código+de+torneio+não+encontrado", status_code=303)
+
+@app.post("/t/{codigo}/apagar-torneio")
+def apagar_torneio_route(request: Request, codigo: str):
+    torneios = carregar_torneios_db()
+    t_atual = next((item for item in torneios if item[2].upper() == codigo.upper()), None)
+    if t_atual:
+        apagar_torneio_db(t_atual[0])
+        restantes = carregar_torneios_db()
+        if restantes:
+            return RedirectResponse(url=f"/t/{restantes[0][2]}", status_code=303)
     return RedirectResponse(url="/", status_code=303)
 
-@app.post("/registar")
-def registar(username: str = Form(...), senha: str = Form(...)):
-    senhas_fracas = ["123456", "senha123", "admin", "abc12345", "12345678"]
-    if len(senha) < 6 or senha in senhas_fracas:
-        return HTMLResponse("<script>alert('Aviso: Esta palavra-passe é fraca ou curta!'); window.location.href='/';</script>")
-    sucesso, mensagem = registar_usuario(username, senha)
-    if not sucesso: return HTMLResponse(f"<script>alert('{mensagem}'); window.location.href='/';</script>")
-    SESSAO_ATUAL["utilizador"] = username
-    SESSAO_ATUAL["papel"] = "aluno"
-    return RedirectResponse(url="/", status_code=303)
+@app.post("/t/{codigo}/adicionar-modalidade")
+def ad_mod(codigo: str, nome_mod: str = Form(...), titulares: int = Form(...), reservas: int = Form(...)):
+    t = next((item for item in carregar_torneios_db() if item[2].upper() == codigo.upper()), None)
+    if t:
+        adicionar_modalidade_db(t[0], nome_mod.strip(), titulares, reservas)
+    return RedirectResponse(url=f"/t/{codigo}?tab=painel", status_code=303)
 
-@app.post("/login")
-def login(username: str = Form(...), senha: str = Form(...)):
-    papel = verificar_login(username, senha)
-    if papel:
-        SESSAO_ATUAL["utilizador"] = username
-        SESSAO_ATUAL["papel"] = papel
+@app.post("/t/{codigo}/apagar-modalidade")
+def ap_mod(codigo: str, mod_id: int = Form(...)):
+    apagar_modalidade_db(mod_id)
+    return RedirectResponse(url=f"/t/{codigo}?tab=painel", status_code=303)
+
+@app.post("/t/{codigo}/adicionar-serie-turma")
+def ad_st(codigo: str, nome_serie: str = Form(...), letra: str = Form(...)):
+    t = next((item for item in carregar_torneios_db() if item[2].upper() == codigo.upper()), None)
+    if t:
+        adicionar_serie_turma_db(t[0], nome_serie.strip(), letra.upper())
+    return RedirectResponse(url=f"/t/{codigo}?tab=painel", status_code=303)
+
+@app.post("/t/{codigo}/apagar-serie-turma")
+def ap_st(codigo: str, st_id: int = Form(...)):
+    apagar_serie_turma_db(st_id)
+    return RedirectResponse(url=f"/t/{codigo}?tab=painel", status_code=303)
+
+@app.post("/t/{codigo}/adicionar-equipa")
+async def adicionar_eq(request: Request, codigo: str):
+    t = next((item for item in carregar_torneios_db() if item[2].upper() == codigo.upper()), None)
+    if not t:
         return RedirectResponse(url="/", status_code=303)
-    return HTMLResponse("<script>alert('Utilizador ou palavra-passe incorretos!'); window.location.href='/';</script>")
+        
+    form_data = await request.form()
+    nome_time = form_data.get("nome_time", "").strip()
+    modalidade = form_data.get("modalidade", "").strip()
+    serie_turma_escolhida = form_data.get("serie_turma_escolhida", "")
+    logo_url = form_data.get("logo_url", "").strip()
+    
+    partes = serie_turma_escolhida.split(" - Turma ")
+    serie = partes[0]
+    turma = partes[1] if len(partes) > 1 else "A"
+    
+    titulares = []
+    reservas = []
+    for key, value in form_data.items():
+        if key.startswith("titular_") and value.strip():
+            titulares.append(value.strip())
+        elif key.startswith("reserva_") and value.strip():
+            reservas.append(value.strip())
+            
+    sucesso, msg = adicionar_time_db(t[0], nome_time, modalidade, serie, turma, logo_url, titulares, reservas)
+    if not sucesso:
+        return RedirectResponse(url=f"/t/{codigo}?tab=painel&erro_inscricao={msg}&mod_sel={modalidade}", status_code=303)
+        
+    return RedirectResponse(url=f"/t/{codigo}?tab=resultados", status_code=303)
+
+@app.post("/t/{codigo}/apagar-time")
+def apagar_eq(codigo: str, time_id: int = Form(...)):
+    apagar_time_db(time_id)
+    return RedirectResponse(url=f"/t/{codigo}?tab=resultados", status_code=303)
+
+@app.post("/t/{codigo}/publicar-mensagem")
+def pub_msg(request: Request, codigo: str, categoria: str = Form(...), conteudo: str = Form(...)):
+    t = next((item for item in carregar_torneios_db() if item[2].upper() == codigo.upper()), None)
+    if t:
+        username = request.cookies.get("user") or "Admin"
+        publicar_mensagem_db(t[0], username, categoria, conteudo)
+    return RedirectResponse(url=f"/t/{codigo}?tab=painel", status_code=303)
+
+@app.post("/t/{codigo}/apagar-mensagem")
+def ap_msg(codigo: str, msg_id: int = Form(...)):
+    apagar_mensagem_db(msg_id)
+    return RedirectResponse(url=f"/t/{codigo}?tab=painel", status_code=303)
+
+@app.post("/t/{codigo}/gerar-confrontos")
+def gerar_conf(codigo: str):
+    t = next((item for item in carregar_torneios_db() if item[2].upper() == codigo.upper()), None)
+    if t:
+        gerar_confrontos_automaticos(t[0])
+    return RedirectResponse(url=f"/t/{codigo}?tab=confrontos", status_code=303)
+
+@app.post("/t/{codigo}/atualizar-resultado")
+def at_res(codigo: str, conf_id: int = Form(...), gols1: int = Form(...), gols2: int = Form(...), data_hora: str = Form(...), local: str = Form(...), status_opcao: str = Form(...)):
+    atualizar_resultado_confronto(conf_id, gols1, gols2, data_hora, local, status_opcao)
+    return RedirectResponse(url=f"/t/{codigo}?tab=confrontos", status_code=303)
 
 @app.get("/logout")
 def logout():
-    SESSAO_ATUAL["utilizador"] = None
-    SESSAO_ATUAL["papel"] = None
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/alterar-papel")
-def alterar_papel(user_id: int = Form(...), novo_papel: str = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin': alterar_papel_db(user_id, novo_papel)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/apagar-usuario")
-def apagar_usuario(user_id: int = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin':
-        apagar_usuario_db(user_id)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/atualizar-limite")
-def atualizar_limite(mod_id: int = Form(...), novo_limite: int = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin': atualizar_limite_modalidade_db(mod_id, novo_limite)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/adicionar-modalidade")
-def adicionar_modalidade(nome_mod: str = Form(...), limite_mod: int = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin': adicionar_modalidade_db(nome_mod.strip(), limite_mod)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/apagar-modalidade")
-def apagar_modalidade(mod_id: int = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin': apagar_modalidade_db(mod_id)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/adicionar-equipa")
-def adicionar_equipa(nome_time: str = Form(...), modalidade: str = Form(...)):
-    sucesso, mensagem = adicionar_time_db(nome_time.strip(), modalidade)
-    if not sucesso: return HTMLResponse(f"<script>alert('{mensagem}'); window.location.href='/';</script>")
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/apagar-time")
-def apagar_time(nome_time: str = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin': apagar_time_db(nome_time)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/gerar-confrontos")
-def gerar_confrontos():
-    if SESSAO_ATUAL["papel"] == 'admin':
-        sucesso, msg = gerar_confrontos_automaticos()
-        return HTMLResponse(f"<script>alert('{msg}'); window.location.href='/?tab=confrontos';</script>")
-    return RedirectResponse(url="/?tab=confrontos", status_code=303)
-
-@app.post("/atualizar-resultado")
-def atualizar_resultado(conf_id: int = Form(...), gols1: int = Form(...), gols2: int = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin':
-        atualizar_resultado_confronto(conf_id, gols1, gols2)
-    return RedirectResponse(url="/?tab=confrontos", status_code=303)
-
-@app.post("/enviar-msg")
-def enviar_msg(categoria: str = Form(...), conteudo: str = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin':
-        autor = SESSAO_ATUAL["utilizador"] or "Admin"
-        publicar_mensagem_db(autor, categoria, conteudo)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/apagar-msg")
-def apagar_msg(msg_id: int = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin': apagar_mensagem_db(msg_id)
-    return RedirectResponse(url="/", status_code=303)
-
-@app.post("/reset-senha")
-def reset_senha(user_id: int = Form(...), nova_senha: str = Form(...)):
-    if SESSAO_ATUAL["papel"] == 'admin': resetar_senha_db(user_id, nova_senha)
-    return RedirectResponse(url="/", status_code=303)
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(key="user")
+    return response
